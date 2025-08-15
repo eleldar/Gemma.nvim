@@ -75,6 +75,7 @@ function Api.chat_completions(custom_params, cb, should_stop)
                 and json.choices[1]
                 and json.choices[1].delta
                 and json.choices[1].delta.content
+                and json.choices[1].delta.content ~= vim.NIL
               then
                 cb(json.choices[1].delta.content, state)
                 raw_chunks = raw_chunks .. json.choices[1].delta.content
@@ -147,44 +148,68 @@ function Api.make_call(url, params, cb)
     :start()
 end
 
+-- Полностью замените функцию Api.handle_response на безопасную к vim.NIL
 Api.handle_response = vim.schedule_wrap(function(response, exit_code, cb)
   os.remove(TMP_MSG_FILENAME)
+
   if exit_code ~= 0 then
     vim.notify("An Error Occurred ...", vim.log.levels.ERROR)
     cb("ERROR: API Error")
+    return
   end
 
   local result = table.concat(response:result(), "\n")
   local json = vim.fn.json_decode(result)
+
   if json == nil then
     cb("No Response.")
-  elseif json.error then
+    return
+  end
+
+  if json.error then
     cb("// API ERROR: " .. json.error.message)
-  else
-    local message = json.choices[1].message
-    if message ~= nil then
-      local message_response
-      local first_message = json.choices[1].message
-      if first_message.function_call then
-        message_response = vim.fn.json_decode(first_message.function_call.arguments)
-      else
-        message_response = first_message.content
-      end
-      if (type(message_response) == "string" and message_response ~= "") or type(message_response) == "table" then
-        cb(message_response, json.usage)
-      else
-        cb("...")
-      end
+    return
+  end
+
+  local function not_nil(v)
+    return v ~= nil and v ~= vim.NIL
+  end
+
+  local choice = json.choices and json.choices[1] or nil
+  if not choice then
+    cb("...")
+    return
+  end
+
+  local message = choice.message
+  if not_nil(message) then
+    local first_message = message
+    local message_response
+
+    local fc = first_message.function_call
+    if not_nil(fc) and type(fc) == "table" and not_nil(fc.arguments) then
+      local ok_args, decoded = pcall(vim.fn.json_decode, fc.arguments)
+      message_response = ok_args and decoded or tostring(fc.arguments)
     else
-      local response_text = json.choices[1].text
-      if type(response_text) == "string" and response_text ~= "" then
-        cb(response_text, json.usage)
-      else
-        cb("...")
-      end
+      local content = not_nil(first_message.content) and first_message.content or ""
+      message_response = content
+    end
+
+    if (type(message_response) == "string" and message_response ~= "") or type(message_response) == "table" then
+      cb(message_response, json.usage)
+    else
+      cb("...")
+    end
+  else
+    local response_text = choice.text
+    if type(response_text) == "string" and response_text ~= "" then
+      cb(response_text, json.usage)
+    else
+      cb("...")
     end
   end
 end)
+
 
 function Api.close()
   if Api.job then
